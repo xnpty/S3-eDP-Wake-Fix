@@ -1,0 +1,390 @@
+diff --git a/kexts/NVRM/NVRM.cpp b/kexts/NVRM/NVRM.cpp
+index 65994fbb26ef8f4c4245936730fb4e4ce7115754..eb766260477dabdffc92c3e5d55cc5c77eeee176 100644
+--- a/kexts/NVRM/NVRM.cpp
++++ b/kexts/NVRM/NVRM.cpp
+@@ -21,6 +21,7 @@ extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/acpi/IOACPIPlatformDevice.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/pwr_mgt/RootDomain.h>
+ #include <mach/mach_time.h>
+ #include <kern/sched_prim.h>
+ #include <libkern/OSDebug.h>
+@@ -71,6 +72,13 @@ extern "C" void *nvkms_xnu_kapi_table(void);
+ extern "C" NvU64 nv_xnu_phys_for_kernel_va(const void *va);
+ class NVRMDisplay : public IOService { OSDeclareDefaultStructors(NVRMDisplay) };
+ OSDefineMetaClassAndStructors(NVRMDisplay, IOService)
++struct LoqPanelState {
++    UInt32 muxPad = 0;
++    UInt32 resetPad = 0;
++    UInt32 mode = 0;
++    UInt32 route = 0;
++    UInt32 reset = 0;
++};
+ #define NVRM_MAX_HEADS 4
+ static IOService *gDisplayNub0;
+ static void nvrm_display_publish(IOService *provider, NvU32 gpuId)
+@@ -148,6 +156,9 @@ private:
+     } fPciSave = {};
+     void gpuSuspend();
+     void gpuResume();
++    LoqPanelState fLoqPanelState;
++    void saveLoqPanelState();
++    void restoreLoqPanelState();
+     void pciSaveForSleep();
+     bool pciRestoreAfterWake();
+     bool gpuAnswers();
+@@ -1742,6 +1753,123 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
+     return kIOPMAckImplied;
+ }
+ 
++// NECN53WW exposes the eDP MUX and link-reset pin through LCD0. Read the
++// OEM pad identifiers so an unconfigured port or a changed route mode is
++// never mistaken for a display that needs its last state restored.
++static IOACPIPlatformDevice *loqLcdDevice()
++{
++    auto entry = IORegistryEntry::fromPath("IOACPIPlane:/_SB/PC00/PEG1@10000/PEGP@0/LCD0@8000a450");
++    auto lcd = OSDynamicCast(IOACPIPlatformDevice, entry);
++    UInt64 address = 0;
++    if (lcd && lcd->evaluateInteger("_ADR", &address) == kIOReturnSuccess &&
++        static_cast<UInt32>(address) == 0x8000a450)
++        return lcd;
++    OSSafeReleaseNULL(entry);
++    return nullptr;
++}
++
++static IOReturn loqPanelMethod(IOACPIPlatformDevice *lcd, const char *method,
++                               UInt32 argument, UInt32 *result)
++{
++    OSObject *parameter = OSNumber::withNumber(argument, 32);
++    if (!parameter)
++        return kIOReturnNoMemory;
++    IOReturn status = result ? lcd->evaluateInteger(method, result, &parameter, 1)
++                             : lcd->evaluateObject(method, nullptr, &parameter, 1);
++    parameter->release();
++    return status;
++}
++
++static bool loqDisplayPad(UInt32 pad)
++{
++    // Counts from this board's GPCS. Group 12 is virtual GPIO.
++    static constexpr UInt8 padsPerGroup[] = {25, 23, 12, 27, 8, 24, 8, 24, 17, 9, 16, 24, 0, 8, 23, 15, 24, 25};
++    const UInt32 group = (pad >> 16) & 0xff;
++    return pad != 0 && group < sizeof(padsPerGroup) && (pad & 0xffff) < padsPerGroup[group];
++}
++
++static LoqPanelState loqReadPanelState(IOACPIPlatformDevice *lcd)
++{
++    LoqPanelState state;
++    auto entry = IORegistryEntry::fromPath("IOACPIPlane:/_SB/PC00/PEG1@10000/PEGP@0");
++    if (auto gpu = OSDynamicCast(IOACPIPlatformDevice, entry)) {
++        if (gpu->evaluateInteger("DMMP", &state.muxPad) != kIOReturnSuccess)
++            state.muxPad = 0;
++        if (gpu->evaluateInteger("DLRP", &state.resetPad) != kIOReturnSuccess)
++            state.resetPad = 0;
++    }
++    OSSafeReleaseNULL(entry);
++    if (!loqDisplayPad(state.muxPad))
++        return {};
++
++    if (loqPanelMethod(lcd, "MXDM", 0, &state.mode) != kIOReturnSuccess ||
++        loqPanelMethod(lcd, "MXDS", 0, &state.route) != kIOReturnSuccess)
++        return {};
++
++    if (state.resetPad != state.muxPad && loqDisplayPad(state.resetPad)) {
++        if (loqPanelMethod(lcd, "LRST", 0, &state.reset) != kIOReturnSuccess || state.reset > 2)
++            state.reset = 0;
++    }
++    return state;
++}
++
++void NVRM::saveLoqPanelState()
++{
++    fLoqPanelState = {};
++    UInt32 enabled = 0;
++    if (!PE_parse_boot_argn("nvrmloqs3", &enabled, sizeof enabled) || enabled != 1 ||
++        fPCI->configRead32(0) != 0x28e110de || fPCI->configRead32(0x2c) != 0x3d0617aa)
++        return;
++
++    auto root = getPMRootDomain();
++    if (!root || root->getProperty("IOPMDeepIdleSupported") == kOSBooleanTrue)
++        return;
++
++    if (auto lcd = loqLcdDevice()) {
++        fLoqPanelState = loqReadPanelState(lcd);
++        lcd->release();
++    }
++    LOG("LOQ S3 eDP before sleep: mode %u route %u reset %u", fLoqPanelState.mode,
++        fLoqPanelState.route, fLoqPanelState.reset);
++}
++
++void NVRM::restoreLoqPanelState()
++{
++    const LoqPanelState saved = fLoqPanelState;
++    fLoqPanelState = {};
++    // MXDM 2 is discrete-only. MXDS 2 routes the panel to the NVIDIA GPU.
++    if (saved.mode != 2 || saved.route != 2)
++        return;
++
++    auto lcd = loqLcdDevice();
++    if (!lcd)
++        return;
++
++    LoqPanelState current = loqReadPanelState(lcd);
++    LOG("LOQ S3 eDP after wake: mode %u route %u reset %u", current.mode, current.route, current.reset);
++    if (current.mode == saved.mode && current.muxPad == saved.muxPad) {
++        if (current.route == 1) {
++            UInt32 restored = 0;
++            const IOReturn status = loqPanelMethod(lcd, "MXDS", 0x11, &restored);
++            current.route = 0;
++            if (status == kIOReturnSuccess)
++                loqPanelMethod(lcd, "MXDS", 0, &current.route);
++            LOG("LOQ S3 eDP discrete route restore: 0x%x, route %u", status, current.route);
++        }
++        // Preserve a previously released link. An asserted reset before
++        // system sleep can belong to the panel's ordinary power-down path.
++        if (current.route == 2 && saved.reset == 2 && current.reset == 1 &&
++            current.resetPad == saved.resetPad) {
++            const IOReturn status = loqPanelMethod(lcd, "LRST", saved.reset, nullptr);
++            UInt32 restored = 0;
++            if (status == kIOReturnSuccess)
++                loqPanelMethod(lcd, "LRST", 0, &restored);
++            LOG("LOQ S3 eDP link reset state restore: 0x%x, state %u", status, restored);
++        }
++    }
++    lcd->release();
++}
++
+ // Linux order (nvidia_suspend): NVKMS first, while the GPU still serves the core channel, then RM standby. RM saves
+ // what it must keep from VRAM to system memory and unloads GSP-RM; the GPU then loses power with the slot.
+ void NVRM::gpuSuspend()
+@@ -1749,6 +1877,7 @@ void NVRM::gpuSuspend()
+     uint64_t t0 = mach_absolute_time();
+     fPmCycles++;
+     nvrm_power_suspend(fPower);  // drain before closing the RM PM gate
++    saveLoqPanelState();
+     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm);
+     setProperty("nvrm-pm", "suspended");
+     LOG("sleep #%u: suspending the GPU (NVKMS, then RM standby)", fPmCycles);
+@@ -1778,6 +1907,7 @@ void NVRM::gpuResume()
+     LOG("wake #%u: resuming the GPU", fPmCycles);
+     nv_xnu_pm_take();
+     bool ok = pciRestoreAfterWake() && gpuAnswers();
++    if (ok) restoreLoqPanelState();
+     if (fIntSrc) fIntSrc->enable();
+     NV_STATUS st = ok ? rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME) : NV_ERR_GPU_IS_LOST;
+     ok = st == NV_OK;
+diff --git a/kexts/NVRMFB/fb/nvrm-fb.cpp b/kexts/NVRMFB/fb/nvrm-fb.cpp
+index 0a5489b155260e475a400e5df4f3c3cda26c5f0f..957548331a536d8cb6f23d7a1e11f24bba7c43df 100644
+--- a/kexts/NVRMFB/fb/nvrm-fb.cpp
++++ b/kexts/NVRMFB/fb/nvrm-fb.cpp
+@@ -1593,6 +1593,36 @@ void NVRMNVDAFramebuffer::hotplugKick()
+     uint64_t d; clock_interval_to_deadline(1500, kMillisecondScale, &d);
+     thread_call_enter_delayed(gHotplug, d);
+ }
++
++static bool nvrmDefaultEdid(const NvU8 *bytes, NvU32 size)
++{
++    // NVIDIA's NVD:0000 fallback is a single EDID block.
++    return size == 128 && bytes[8] == 0x3a && bytes[9] == 0xc4 && !bytes[10] && !bytes[11];
++}
++
++static bool nvrmRestorePanelEdid(const struct nvrm_dpy_rec &saved,
++                               struct NvKmsKapiDynamicDisplayParams *current)
++{
++    static const NvU8 header[] = {0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
++    const NvU32 size = saved.edidSize;
++    if (!saved.internal || !current->connected || current->handle != saved.handle ||
++        !nvrmDefaultEdid(current->edid.buffer, current->edid.bufferSize) ||
++        size < 128 || size > sizeof saved.edid || size > sizeof current->edid.buffer || size % 128 ||
++        size / 128 != 1u + saved.edid[126] || memcmp(saved.edid, header, sizeof header) != 0 ||
++        nvrmDefaultEdid(saved.edid, size)) return false;
++    for (NvU32 block = 0; block < size; block += 128) {
++        NvU8 sum = 0;
++        for (NvU32 i = 0; i < 128; ++i) sum = (NvU8)(sum + saved.edid[block + i]);
++        if (sum) return false;
++    }
++    // Retain the physical panel's timings. NVKMS still determines whether the link is connected.
++    nvu_zero(current->edid.buffer, sizeof current->edid.buffer);
++    nvu_copy(current->edid.buffer, saved.edid, size);
++    current->edid.bufferSize = (NvU16)size;
++    current->overrideEdid = NV_TRUE;
++    return true;
++}
++
+ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
+ {
+     NVRMNVDAFramebuffer *me = gFB;
+@@ -1619,6 +1649,12 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
+             // that was seen disconnected and is connected again gets its head lit with the same full mode set the
+             // display-wake path uses (reflip). Only on that transition, so other display events cause no modeset.
+             if (!dynOk) continue;
++            if (nvrmRestorePanelEdid(gDpy[kdpy], dd)) {
++                const bool restored = me->fKms->getDynamicDisplayInfo(me->fDev, dd) && dd->connected;
++                FBLOG("internal panel 0x%x: restored %u-byte EDID after NVIDIA fallback -> %s",
++                      handles[i], (unsigned)dd->edid.bufferSize, restored ? "ok" : "not ready");
++                if (!restored) continue;
++            }
+             gDpy[kdpy].connected = dd->connected ? NV_TRUE : NV_FALSE;
+             bool audioTypeChanged = false;
+             if (dd->connected && kdpy >= 0) {
+@@ -4554,9 +4590,14 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
+     FBLOG("setPowerState %lu", (unsigned long)ordinal);
+     if (ordinal) {
+         fPowerOn = true;
+-        // a failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7 did:
+-        // without the notification it never redraws, and the head can sit black with nothing left to retry it (review)
+-        (void)setHeadPower(true);
++        // RM can finish before the framebuffer powers on, so its wake callback may have already run.
++        // Retry a rejected head commit after leaving the power callback. Keep notifying WindowServer below.
++        if (!setHeadPower(true) && fGpuWake) {
++            uint64_t deadline;
++            clock_interval_to_deadline(500, kMillisecondScale, &deadline);
++            scheduleCall(fGpuWake, deadline);
++            FBLOG("power on: head %u did not light, retry queued", fHead);
++        }
+         // A system sleep cleared pagingState (IOGraphics' system work, with kIOFBNotifyWillSleep to every client).
+         // This override replaces IOFramebuffer::setPowerState, so the family's wake work never runs, and
+         // handleEvent() does nothing off the controller's power thread - so no client ever saw kIOFBNotifyDidWake,
+diff --git a/tools/test_display_power_retry.py b/tools/test_display_power_retry.py
+index 132c60a455c8be28c32d20c448f3c92655be3984..d14bc3bbc84d56c36adefae06f06fa20c75e5c2b 100644
+--- a/tools/test_display_power_retry.py
++++ b/tools/test_display_power_retry.py
+@@ -18,6 +18,7 @@ assert 'return kIOReturnSuccess' in connection_power and 'setHeadPower' not in c
+ fixture = r'''
+ #include <cassert>
+ #include <cstdio>
++#include <cstdint>
+ #include <mutex>
+ using IOReturn=int;
+ struct IOService {};
+@@ -41,6 +42,10 @@ static bool PE_parse_boot_argn(const char*,char*,unsigned long) { return disable
+ static int OSAddAtomic(int n,int *value) { int old=*value;*value+=n;return old; }
+ #define FBLOG(...) ((void)0)
+ #define FBLOGV(...) ((void)0)
++constexpr unsigned kMillisecondScale=1000000;
++static void clock_interval_to_deadline(unsigned interval,unsigned scale,uint64_t *deadline) {
++    *deadline=uint64_t(interval)*scale;
++}
+ struct NVRMNVDAFramebuffer {
+     NVRMHeadGateState fPrimaryGate;
+     bool fHeadSlept=false, fModeSet=true, sleepOK=true, wakeOK=true;
+@@ -49,8 +54,12 @@ struct NVRMNVDAFramebuffer {
+     void *fSurf=this;
+     unsigned fHead=0, sleeps=0, wakes=0, notifications=0, audioPublishes=0;
+     void publishDisplayAudioProperties() { audioPublishes++; }
+-    unsigned ddcCalls=0; bool ddcLast=true;
+-    void ddcSetPowered(bool on) { ddcCalls++; ddcLast=on; }   // DDC/CI follows display power (w29-display)
++    void *fGpuWake=this;
++    unsigned wakeRetries=0;
++    void scheduleCall(void *call,uint64_t deadline) {
++        assert(call==fGpuWake && deadline==500000000);
++        wakeRetries++;
++    }
+     int fStopping=0, fReflipRc=0;
+     bool headOff() { sleeps++; return sleepOK; }
+     bool reflip() { wakes++; return wakeOK; }
+@@ -71,6 +80,7 @@ int main() {
+     f.wakeOK=false; f.setPowerState(1,nullptr);
+     // a failed wake stays retryable, and WindowServer is still told the display is on (1.14.7 behaviour)
+     assert(f.fHeadSlept && f.wakes==1 && f.notifications==1);
++    assert(f.wakeRetries==1);
+     // the display's audio is published again only once the head really is back (PR #366)
+     assert(f.audioPublishes==0);
+     f.wakeOK=true; f.setPowerState(1,nullptr);
+@@ -93,15 +103,13 @@ int main() {
+     // a display wake before NVRM resumed the GPU pushes nothing and leaves the head for NVRM's resume to light
+     wakes=f.wakes; unsigned notes=f.notifications; f.setPowerState(1,nullptr);
+     assert(f.fHeadSlept && f.wakes==wakes && f.fPowerOn && f.notifications==notes+1 && !f.familyWakes);
++    assert(f.wakeRetries==1);
+     // the first power-on after a system sleep lights the head and does the family's wake work once
+     f.setPowerState(0,nullptr); f.gpuReady=true; f.fSysSlept=true; f.pagingState=false;
+     notes=f.notifications; f.setPowerState(1,nullptr);
+     assert(!f.fHeadSlept && f.wakes==wakes+1 && f.familyWakes==1 && !f.fSysSlept && f.pagingState);
+     assert(f.notifications==notes+1);
+     f.setPowerState(1,nullptr); assert(f.familyWakes==1 && f.notifications==notes+2);
+-    // DDC/CI is told about every power transition, awake or asleep, so a sleeping monitor is not sent commands
+-    unsigned dc=f.ddcCalls; f.setPowerState(0,nullptr); assert(f.ddcCalls==dc+1 && !f.ddcLast);
+-    f.setPowerState(1,nullptr); assert(f.ddcCalls==dc+2 && f.ddcLast);
+     puts("PASS: failed sleep, failed wake retry with notification, audio republished only on a real wake, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate, GPU standby, wake before resume, system wake");
+ }
+ '''
+diff --git a/tools/test_panel_wake_edid.py b/tools/test_panel_wake_edid.py
+new file mode 100644
+index 0000000..72fd6a3
+--- /dev/null
++++ b/tools/test_panel_wake_edid.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python3
++"""Test that only a connected internal panel can reuse its validated EDID."""
++
++from pathlib import Path
++import subprocess
++import tempfile
++
++root = Path(__file__).resolve().parents[1]
++source = (root / "kexts/NVRMFB/fb/nvrm-fb.cpp").read_text()
++start = source.index("static bool nvrmDefaultEdid(")
++end = source.index("void NVRMNVDAFramebuffer::hotplugFire(", start)
++fixture = r'''
++#include <cassert>
++#include <cstdint>
++#include <cstring>
++using NvU8 = uint8_t;
++using NvU16 = uint16_t;
++using NvU32 = uint32_t;
++constexpr bool NV_TRUE = true;
++struct nvrm_dpy_rec {
++    bool internal;
++    unsigned handle;
++    unsigned edidSize;
++    NvU8 edid[2048];
++};
++struct NvKmsKapiDynamicDisplayParams {
++    unsigned handle;
++    bool connected, overrideEdid, forceConnected;
++    struct { NvU16 bufferSize; NvU8 buffer[2048]; } edid;
++};
++static void nvu_zero(void *data, size_t size) { std::memset(data, 0, size); }
++static void nvu_copy(void *dst, const void *src, size_t size) { std::memcpy(dst, src, size); }
++'''
++checks = r'''
++int main() {
++    nvrm_dpy_rec panel{true, 0x800, 256, {0, 255, 255, 255, 255, 255, 255, 0, 0x06, 0xaf}};
++    panel.edid[126] = 1;
++    NvU8 sum = 0;
++    for (unsigned i = 0; i < 127; ++i) sum += panel.edid[i];
++    panel.edid[127] = -sum;
++
++    NvKmsKapiDynamicDisplayParams fallback{0x800, true, false, false, {128, {}}};
++    fallback.edid.buffer[8] = 0x3a;
++    fallback.edid.buffer[9] = 0xc4;
++    auto current = fallback;
++    assert(nvrmRestorePanelEdid(panel, &current));
++    assert(current.overrideEdid && !current.forceConnected && current.edid.bufferSize == 256);
++    assert(std::memcmp(current.edid.buffer, panel.edid, 256) == 0);
++    assert(!nvrmRestorePanelEdid(panel, &current));
++
++    current = fallback;
++    current.connected = false;
++    assert(!nvrmRestorePanelEdid(panel, &current) && !current.overrideEdid);
++    current = fallback;
++    current.handle = 0x100;
++    assert(!nvrmRestorePanelEdid(panel, &current));
++    current = fallback;
++    panel.internal = false;
++    assert(!nvrmRestorePanelEdid(panel, &current));
++    panel.internal = true;
++    panel.edid[255] = 1;
++    assert(!nvrmRestorePanelEdid(panel, &current));
++    panel.edid[255] = 0;
++    panel.edidSize = 128;
++    assert(!nvrmRestorePanelEdid(panel, &current));
++}
++'''
++with tempfile.TemporaryDirectory() as directory:
++    path = Path(directory)
++    (path / "test.cpp").write_text(fixture + source[start:end] + checks)
++    subprocess.run(["clang++", "-std=c++17", str(path / "test.cpp"), "-o", str(path / "test")], check=True)
++    subprocess.run([str(path / "test")], check=True)
++print("PASS: internal panel EDID fallback and validation")

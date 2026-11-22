@@ -1,0 +1,41 @@
+{
+  "version": "0.1.0",
+  "driver_source": {
+    "url": "https://github.com/HighDelay/nvidia-macos-driver-nvk",
+    "tag": "v3.0.2-nvk",
+    "commit": "6a00e9bc808acb781270d041ee023ccf468b2b90"
+  },
+  "nvidia_source": {
+    "url": "https://github.com/NVIDIA/open-gpu-kernel-modules",
+    "tag": "620.70.06",
+    "commit": "e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9"
+  },
+  "tested": {
+    "model": "Lenovo LOQ 15IAX9 (83GS)",
+    "bios": "NECN53WW",
+    "gpu": "RTX 4050 Laptop GPU (10de:28e1, subsystem 17aa:3d06)",
+    "macos": "26.7.1 (25G241)",
+    "opencore": "1.0.9",
+    "xcode": "26.5 (17F42)"
+  },
+  "kexts": {
+    "NVRM": {
+      "version": "3.0.2",
+      "stock_uuid": "1C74D97E-B23D-3336-8DA0-82D679143014",
+      "uuid": "1DEF6CBC-7D29-3AF7-BE5A-0881EC5316F9",
+      "binary_sha256": "128d347209b7eca8150389cbbd1e7a8bdf47f2a868fcfe0d0557b2668bae9b86",
+      "plist_sha256": "b686282c1ff641969073fbbfcb55715d7b95e6a1925d61a69e3ea77730141b53"
+    },
+    "NVRMFB": {
+      "version": "3.0.1",
+      "stock_uuid": "C2536BB2-74EA-3114-A7DF-AC77F02E6EA8",
+      "uuid": "50BB03BF-D7F1-36AA-9588-9CFD07B29B5A",
+      "binary_sha256": "21c6f5b2de415dbcd133e87ea773be7caff3dc0b8efe2b30908a182ee1458b75",
+      "plist_sha256": "5e638db6416034c120db857d16e8bdadc082d0daf5c7c32f559df23f72d8d7b6"
+    }
+  },
+  "companions": {
+    "com.nullmoth.NVAccel": ["3.0.2", "C2A5599E-E981-3CEE-8E2E-33E95ADCF328"],
+    "com.nullmoth.NVRMAGDC": ["3.0.1", "EEED0224-B389-3677-9AA0-0393429946FC"]
+  }
+}
