@@ -4,6 +4,18 @@
 
 Restore the built-in display when a Lenovo LOQ with the RTX 4050 Laptop GPU wakes from ACPI S3 on macOS Tahoe. On the tested machine, the firmware switched the eDP display MUX to the iGPU during S3 resume even though the firmware was set to discrete-only. The patched NVRM restores the previously active NVIDIA route before resuming NVIDIA RM and NVKMS. NVRMFB retains the panel's valid EDID if NVIDIA temporarily reports its fallback EDID and retries a rejected wake modeset once.
 
+## Diagnose an RTX wake problem
+
+Use [diagnose.py](diagnose.py) on macOS after a sleep/wake attempt. It reads the GPU PCI IDs, loaded driver versions and the most recent ACPI transition in the selected log window. The report can be used on desktops and laptops, including systems outside the installer requirements. It runs with ordinary user permissions.
+
+```sh
+/usr/bin/python3 diagnose.py --connector dp --screen dark
+```
+
+Select `edp` for a laptop panel or `hdmi` for HDMI. Select `--screen working` when you saw the display come back. The default log window is two hours. Use `--last boot` for the current boot. If you report a problem, include the machine or motherboard model, BIOS version and the command output. A failed NVRM resume points to GPU recovery. A successful resume with a failed NVRMFB modeset points to display recovery. A successful modeset with a physically dark screen calls for checking the output link.
+
+Support for a new eDP MUX profile requires an ACPI S3 trace showing that the panel route changes across wake and a verified restore through that board's firmware interface.
+
 ## Requirements
 
 - Lenovo LOQ 15IAX9 (83GS) with RTX 4050 Laptop GPU `10de:28e1` and Lenovo subsystem `17aa:3d06`. The tested BIOS is `NECN53WW`.

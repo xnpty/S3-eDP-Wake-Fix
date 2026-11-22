@@ -4,6 +4,18 @@
 
 Trên máy thử nghiệm, khi thức từ S3, firmware chuyển tuyến eDP sang iGPU dù BIOS đang ở chế độ chỉ dùng GPU rời. NVRM khôi phục tuyến về RTX 4050 trước khi driver tiếp tục khởi tạo màn hình.
 
+## Chẩn đoán wake trên máy RTX khác
+
+Tải [diagnose.py](diagnose.py) và chạy sau một lần sleep/wake trên macOS. Lệnh chỉ đọc PCI ID, phiên bản kext đang nạp và log của lần ngủ hoặc wake gần nhất. Dùng được trên cả desktop và laptop với quyền người dùng thường.
+
+```sh
+/usr/bin/python3 diagnose.py --connector dp --screen dark
+```
+
+Chọn `edp` cho màn hình trong hoặc `hdmi` nếu dùng HDMI. Dùng `--screen working` nếu bạn thấy màn hình lên lại. Lệnh mặc định xem log hai giờ gần nhất. Dùng `--last boot` để xem log từ lần boot hiện tại. Khi báo lỗi, gửi model máy hoặc mainboard, bản BIOS và kết quả của lệnh. Nếu NVRM báo lỗi khi resume thì kiểm tra phần khôi phục GPU. Nếu GPU đã lên nhưng NVRMFB báo modeset lỗi thì kiểm tra phần khôi phục chế độ hiển thị. Nếu log báo modeset thành công mà màn hình vẫn đen thì kiểm tra liên kết từ GPU tới màn hình.
+
+Để thêm hỗ trợ cho một laptop có MUX, cần log xác nhận tuyến màn hình đổi khi wake S3 và kiểm thử cách khôi phục qua firmware của chính model đó.
+
 ## Yêu cầu
 
 - Lenovo LOQ 15IAX9 (83GS), RTX 4050 Laptop `10de:28e1`, subsystem Lenovo `17aa:3d06` và màn hình trong nối với RTX ở chế độ GPU rời. BIOS đã thử là `NECN53WW`.
