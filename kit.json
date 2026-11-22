@@ -1,5 +1,6 @@
 {
-  "version": "0.1.0",
+  "name": "S3-eDP-Wake-Fix",
+  "version": "0.1.1",
   "driver_source": {
     "url": "https://github.com/HighDelay/nvidia-macos-driver-nvk",
     "tag": "v3.0.2-nvk",

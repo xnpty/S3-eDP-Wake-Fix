@@ -19,6 +19,7 @@ from uuid import UUID
 
 HERE = Path(__file__).resolve().parent
 KIT = json.loads((HERE / "kit.json").read_text())
+NAME = KIT["name"]
 KEXTS = KIT["kexts"]
 EXTENSIONS = Path("/Library/Extensions")
 AUXKC = Path("/Library/KernelCollections/AuxiliaryKernelExtensions.kc")
@@ -233,7 +234,7 @@ def install():
                    "installed_aux": digest(out), "original_digests": original_digests}
         (work / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         out.replace(AUXKC)
-    print("Installed the LOQ S3 display fix. Apply the OpenCore boot argument and restart once.")
+    print(f"Installed {NAME}. Apply the OpenCore boot argument and restart once.")
     print(f"Rollback with sudo /usr/bin/python3 install.py rollback '{work}'")
 
 
@@ -266,7 +267,7 @@ def rollback(backup):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=f"{NAME}. {__doc__}")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
     commands.add_parser("install")
@@ -289,4 +290,4 @@ if __name__ == "__main__":
     try:
         main()
     except (OSError, RuntimeError, ValueError, KeyError, struct.error) as error:
-        raise SystemExit(f"LOQ S3 eDP Fix: {error}") from None
+        raise SystemExit(f"{NAME}: {error}") from None

@@ -1,6 +1,6 @@
-# Bản vá màn hình khi LOQ thức từ S3
+# S3-eDP-Wake-Fix
 
-[Tải v0.1.0](https://github.com/xnpty/LOQ-S3-eDP-Fix/releases/tag/v0.1.0) · [English](README.md)
+[Tải v0.1.1](https://github.com/xnpty/S3-eDP-Wake-Fix/releases/tag/v0.1.1) · [English](README.md)
 
 Trên máy thử nghiệm, khi thức từ S3, firmware chuyển tuyến eDP sang iGPU dù BIOS đang ở chế độ chỉ dùng GPU rời. NVRM khôi phục tuyến về RTX 4050 trước khi driver tiếp tục khởi tạo màn hình.
 
@@ -17,8 +17,8 @@ Trên máy thử nghiệm, khi thức từ S3, firmware chuyển tuyến eDP san
 
    ```sh
    shasum -a 256 -c SHA256SUMS
-   ditto -x -k LOQ-S3-eDP-Fix-0.1.0.zip .
-   cd LOQ-S3-eDP-Fix-0.1.0
+   ditto -x -k S3-eDP-Wake-Fix-0.1.1.zip .
+   cd S3-eDP-Wake-Fix-0.1.1
    /usr/bin/python3 install.py check
    sudo /usr/bin/python3 install.py install
    ```

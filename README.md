@@ -1,6 +1,6 @@
-# LOQ S3 eDP Fix
+# S3-eDP-Wake-Fix
 
-[Hướng dẫn tiếng Việt](README.vi.md) · [Download v0.1.0](https://github.com/xnpty/LOQ-S3-eDP-Fix/releases/tag/v0.1.0)
+[Hướng dẫn tiếng Việt](README.vi.md) · [Download v0.1.1](https://github.com/xnpty/S3-eDP-Wake-Fix/releases/tag/v0.1.1)
 
 Restore the built-in display when a Lenovo LOQ with the RTX 4050 Laptop GPU wakes from ACPI S3 on macOS Tahoe. On the tested machine, the firmware switched the eDP display MUX to the iGPU during S3 resume even though the firmware was set to discrete-only. The patched NVRM restores the previously active NVIDIA route before resuming NVIDIA RM and NVKMS. NVRMFB retains the panel's valid EDID if NVIDIA temporarily reports its fallback EDID and retries a rejected wake modeset once.
 
@@ -20,8 +20,8 @@ The hardware test used macOS 26.7.1 (25G241) and OpenCore 1.0.9. The release is 
 
    ```sh
    shasum -a 256 -c SHA256SUMS
-   ditto -x -k LOQ-S3-eDP-Fix-0.1.0.zip .
-   cd LOQ-S3-eDP-Fix-0.1.0
+   ditto -x -k S3-eDP-Wake-Fix-0.1.1.zip .
+   cd S3-eDP-Wake-Fix-0.1.1
    /usr/bin/python3 install.py check
    sudo /usr/bin/python3 install.py install
    ```
